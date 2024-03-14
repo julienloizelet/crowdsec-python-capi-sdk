@@ -33,7 +33,7 @@ class CachedDecision:
 
     Attributes:
         identifier (str): The unique identifier of the decision.
-        scope (str): The scope of the decision such as "IP", "RANGE", "COUNTRY", and more.
+        scope (str): The scope of the decision such as "ip", "range", "country", and more.
         value (str): The value of the decision such as an IP, a range of IPs, a country, and more.
         type (str): The type of the decision such as "ban", "captcha", "bypass", and more.
         origin (str): The origin of the decision such as "capi", "lapi", and more.
@@ -58,7 +58,7 @@ class CachedDecision:
         if not isinstance(self.origin, str):
             raise TypeError("origin must be a string")
         if not isinstance(self.expires_at, int):
-            raise TypeError("expires_at must be an int")
+            raise TypeError("expires_at must be an int (timestamp)")
 
 
 class CacheInterface(ABC):

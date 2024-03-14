@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Tuple
 
 import httpx
 import jwt
-from cscapi.storage import MachineModel, ReceivedDecision, SignalModel, StorageInterface
+from cscapi.storage import MachineModel, SignalModel, StorageInterface
 from more_itertools import batched
 
 __version__ = metadata.version("cscapi").split("+")[0]
@@ -334,7 +334,7 @@ class CAPIClient:
 
     def get_decisions(
         self, main_machine_id: str, scenarios: List[str]
-    ) -> List[ReceivedDecision]:
+    ) -> List:
         scenarios = ",".join(sorted(set(scenarios)))
         machine = self._prepare_machine(
             MachineModel(machine_id=main_machine_id, scenarios=scenarios)

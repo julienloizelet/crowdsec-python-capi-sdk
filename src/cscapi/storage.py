@@ -4,14 +4,6 @@ from typing import List, Optional
 
 
 @dataclass
-class ReceivedDecision:
-    Duration: Optional[str]
-    Value: Optional[str]
-    Scenario: Optional[str]
-    Scope: Optional[str]
-
-
-@dataclass
 class MachineModel:
     machine_id: Optional[str] = ""
     token: Optional[str] = ""
