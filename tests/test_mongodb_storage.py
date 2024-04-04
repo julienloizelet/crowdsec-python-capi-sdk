@@ -1,29 +1,14 @@
+import random
 import os
 import time
 from unittest import TestCase
-import pytest
-import random
 
 from dacite import from_dict
+from mongoengine import disconnect
 
-from cscapi.sql_storage import (
-    ContextDBModel,
-    DecisionDBModel,
-    MachineDBModel,
-    SignalDBModel,
-    SourceDBModel,
-    SQLStorage,
-)
-from cscapi.storage import MachineModel, SourceModel, SignalModel
-
-from cscapi.client import (
-    CAPIClient,
-    CAPIClientConfig,
-)
-
-from sqlalchemy_utils import database_exists, create_database, drop_database
-
-from .test_client import mock_signals
+from cscapi.client import CAPIClient, CAPIClientConfig
+from cscapi.mongodb_storage import MachineDBModel, MongoDBStorage, SignalDBModel
+from cscapi.storage import MachineModel, SignalModel, SourceModel
 
 
 def mock_signals():
@@ -74,32 +59,22 @@ def mock_signals():
     ]
 
 
-class TestSQLStorage(TestCase):
-    def setUp(self) -> None:
-        self.db_path = f"{str(int(time.time()))}.db"
+class TestMongoDBStorage(TestCase):
+    storage = None
+
+    @classmethod
+    def setUpClass(cls):
         # Use .env file to modify variables
-        engine_type = (
-            os.getenv("TEST_SQL_ENGINE") if os.getenv("TEST_SQL_ENGINE") else "sqlite"
+        mongodb_connection = (
+            os.getenv("TEST_MONGODB_CONNECTION")
+            if os.getenv("TEST_MONGODB_CONNECTION")
+            else "mongodb://127.0.0.1:27017/cscapi_test"
         )
-        if engine_type == "sqlite":
-            db_uri = f"sqlite:///{self.db_path}"
-        elif engine_type == "postgres":
-            db_uri = f"{os.getenv('TEST_POSTGRESQL_URL')}{self.db_path}"
-        elif engine_type == "mysql":
-            db_uri = f"{os.getenv('TEST_MYSQL_URL')}{self.db_path}"
-        elif engine_type == "mariadb":
-            db_uri = f"{os.getenv('TEST_MARIADB_URL')}{self.db_path}"
-        else:
-            raise ValueError(f"Unknown engine type: {engine_type}")
-        if not database_exists(db_uri):
-            create_database(db_uri)
-
-        self.storage: SQLStorage = SQLStorage(db_uri)
-        self.db_uri = db_uri
-        print(f"Using {engine_type} engine with {db_uri}")
-
-        self.client = CAPIClient(
-            self.storage,
+        cls.storage: MongoDBStorage = MongoDBStorage(
+            connection_string=mongodb_connection
+        )
+        cls.client = CAPIClient(
+            cls.storage,
             CAPIClientConfig(
                 scenarios=["crowdsecurity/http-bf", "crowdsecurity/ssh-bf"],
                 max_retries=1,
@@ -107,38 +82,37 @@ class TestSQLStorage(TestCase):
             ),
         )
 
-    def tearDown(self) -> None:
-        # postgresql, mysql, mariadb
-        if database_exists(self.db_uri):
-            try:
-                drop_database(self.db_uri)
-            except Exception as e:
-                print(f"Error occurred while dropping the database: {e}")
+    @classmethod
+    def tearDownClass(cls):
+        disconnect()
 
-        # sqlite
-        try:
-            os.remove(self.db_path)
-        except:
-            pass
+    def setUp(self):
+        SignalDBModel.objects.all().delete()
+        MachineDBModel.objects.all().delete()
+
+    def tearDown(self):
+        SignalDBModel.objects.all().delete()
+        MachineDBModel.objects.all().delete()
 
     def test_get_signals_with_no_machine(self):
-        assert len(self.storage.get_signals(limit=1000)) == 0
+        self.assertEqual(len(self.storage.get_signals(limit=1000)), 0)
         for x in range(10):
             self.client.add_signals(mock_signals())
             time.sleep(0.05)
-        assert len(self.storage.get_signals(limit=1000)) == 10
-        assert len(self.storage.get_signals(limit=5)) == 5
-        assert len(self.storage.get_signals(limit=5, offset=8)) == 2
-        assert len(self.storage.get_signals(limit=1000, sent=True)) == 0
-        assert len(self.storage.get_signals(limit=1000, sent=False)) == 10
-        assert len(self.storage.get_signals(limit=1000, is_failing=True)) == 0
-        assert len(self.storage.get_signals(limit=1000, is_failing=False)) == 10
-        assert (
-            len(self.storage.get_signals(limit=1000, sent=False, is_failing=False))
-            == 10
+        self.assertEqual(len(self.storage.get_signals(limit=1000)), 10)
+        self.assertEqual(len(self.storage.get_signals(limit=5)), 5)
+        self.assertEqual(len(self.storage.get_signals(limit=5, offset=8)), 2)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, sent=True)), 0)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, sent=False)), 10)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, is_failing=True)), 0)
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, is_failing=False)), 10
         )
-        assert (
-            len(self.storage.get_signals(limit=1000, sent=True, is_failing=False)) == 0
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, sent=False, is_failing=False)), 10
+        )
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, sent=True, is_failing=False)), 0
         )
 
     def test_get_signals_with_machine(self):
@@ -149,23 +123,24 @@ class TestSQLStorage(TestCase):
             scenarios="crowdsecurity/http-probing",
         )
         self.assertTrue(self.storage.update_or_create_machine(m1))
-        assert len(self.storage.get_signals(limit=1000)) == 0
+        self.assertEqual(len(self.storage.get_signals(limit=1000)), 0)
         for x in range(10):
             self.client.add_signals(mock_signals())
             time.sleep(0.05)
-        assert len(self.storage.get_signals(limit=1000)) == 10
-        assert len(self.storage.get_signals(limit=5)) == 5
-        assert len(self.storage.get_signals(limit=5, offset=8)) == 2
-        assert len(self.storage.get_signals(limit=1000, sent=True)) == 0
-        assert len(self.storage.get_signals(limit=1000, sent=False)) == 10
-        assert len(self.storage.get_signals(limit=1000, is_failing=True)) == 0
-        assert len(self.storage.get_signals(limit=1000, is_failing=False)) == 10
-        assert (
-            len(self.storage.get_signals(limit=1000, sent=False, is_failing=False))
-            == 10
+        self.assertEqual(len(self.storage.get_signals(limit=1000)), 10)
+        self.assertEqual(len(self.storage.get_signals(limit=5)), 5)
+        self.assertEqual(len(self.storage.get_signals(limit=5, offset=8)), 2)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, sent=True)), 0)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, sent=False)), 10)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, is_failing=True)), 0)
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, is_failing=False)), 10
         )
-        assert (
-            len(self.storage.get_signals(limit=1000, sent=True, is_failing=False)) == 0
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, sent=False, is_failing=False)), 10
+        )
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, sent=True, is_failing=False)), 0
         )
 
     def test_get_signals_with_failing_machine(self):
@@ -177,25 +152,25 @@ class TestSQLStorage(TestCase):
             is_failing=True,
         )
         self.assertTrue(self.storage.update_or_create_machine(m1))
-        assert len(self.storage.get_signals(limit=1000)) == 0
+        self.assertEqual(len(self.storage.get_signals(limit=1000)), 0)
         for x in range(10):
             self.client.add_signals(mock_signals())
             time.sleep(0.05)
-        assert len(self.storage.get_signals(limit=1000)) == 10
-        assert len(self.storage.get_signals(limit=5)) == 5
-        assert len(self.storage.get_signals(limit=5, offset=8)) == 2
-        assert len(self.storage.get_signals(limit=1000, sent=True)) == 0
-        assert len(self.storage.get_signals(limit=1000, sent=False)) == 10
-        assert len(self.storage.get_signals(limit=1000, is_failing=True)) == 10
-        assert len(self.storage.get_signals(limit=1000, is_failing=False)) == 0
-        assert (
-            len(self.storage.get_signals(limit=1000, sent=False, is_failing=False)) == 0
+        self.assertEqual(len(self.storage.get_signals(limit=1000)), 10)
+        self.assertEqual(len(self.storage.get_signals(limit=5)), 5)
+        self.assertEqual(len(self.storage.get_signals(limit=5, offset=8)), 2)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, sent=True)), 0)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, sent=False)), 10)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, is_failing=True)), 10)
+        self.assertEqual(len(self.storage.get_signals(limit=1000, is_failing=False)), 0)
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, sent=False, is_failing=False)), 0
         )
-        assert (
-            len(self.storage.get_signals(limit=1000, sent=True, is_failing=False)) == 0
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, sent=True, is_failing=False)), 0
         )
-        assert (
-            len(self.storage.get_signals(limit=1000, sent=True, is_failing=True)) == 0
+        self.assertEqual(
+            len(self.storage.get_signals(limit=1000, sent=True, is_failing=True)), 0
         )
 
     def test_create_and_retrieve_machine(self):
@@ -237,8 +212,7 @@ class TestSQLStorage(TestCase):
             machine_id="1", token="2", password="2", scenarios="crowdsecurity/http-bf"
         )
         self.storage.update_or_create_machine(m2)
-        with self.storage.session.begin() as session:
-            self.assertEqual(1, session.query(MachineDBModel).count())
+        self.assertEqual(1, MachineDBModel.objects.count())
 
         retrieved = self.storage.get_machine_by_id("1")
 
@@ -248,60 +222,56 @@ class TestSQLStorage(TestCase):
         self.assertEqual(retrieved.scenarios, m2.scenarios)
 
     def test_create_signal(self):
-        assert self.storage.get_signals(limit=1000) == []
+        self.assertEqual(self.storage.get_signals(limit=1000), [])
         self.storage.update_or_create_signal(mock_signals()[0])
         signals = self.storage.get_signals(limit=1000)
-        assert len(signals) == 1
+        self.assertEqual(len(signals), 1)
         signal = signals[0]
 
-        assert signal.alert_id is not None
-        assert signal.sent == False
+        self.assertIsNotNone(signal.alert_id)
+        self.assertFalse(signal.sent)
 
-        with self.storage.session.begin() as session:
-            assert session.query(SignalDBModel).count() == 1
-            assert session.query(ContextDBModel).count() == 4
-            assert session.query(DecisionDBModel).count() == 1
-            assert session.query(SourceDBModel).count() == 1
-        assert len(signal.context) == 4
+        self.assertEqual(SignalDBModel.objects.count(), 1)
+        self.assertEqual(len(signal.context), 4)
 
-        assert len(signal.decisions) == 1
+        self.assertEqual(len(signal.decisions), 1)
 
-        assert isinstance(signal.source, SourceModel)
+        self.assertTrue(isinstance(signal.source, SourceModel))
 
     def test_update_signal(self):
-        assert self.storage.get_signals(limit=1000) == []
+        self.assertEqual(self.storage.get_signals(limit=1000), [])
 
         to_insert = mock_signals()[0]
         self.storage.update_or_create_signal(to_insert)
         signals = self.storage.get_signals(limit=1000)
 
-        assert len(signals) == 1
+        self.assertEqual(len(signals), 1)
         signal = signals[0]
 
-        assert signal.sent == False
+        self.assertFalse(signal.sent)
 
         signal.sent = True
 
         self.storage.update_or_create_signal(signal)
         signals = self.storage.get_signals(limit=1000)
 
-        assert len(signals) == 1
+        self.assertEqual(len(signals), 1)
         signal = signals[0]
 
-        assert signal.sent == True
+        self.assertTrue(signal.sent)
 
     def test_mass_update_signals(self):
-        assert self.storage.get_signals(limit=1000) == []
+        self.assertEqual(self.storage.get_signals(limit=1000), [])
 
         for x in range(10):
             self.storage.update_or_create_signal(mock_signals()[0])
 
         signals = self.storage.get_signals(limit=1000)
 
-        assert len(signals) == 10
+        self.assertEqual(len(signals), 10)
         for s in signals:
-            assert s.sent == False
-            assert s.scenario_trust == "trusted"
+            self.assertFalse(s.sent)
+            self.assertEqual(s.scenario_trust, "trusted")
         signal_ids = [s.alert_id for s in signals]
         self.storage.mass_update_signals(
             signal_ids, {"sent": True, "scenario_trust": "manual"}
@@ -309,7 +279,7 @@ class TestSQLStorage(TestCase):
 
         signals = self.storage.get_signals(limit=1000)
 
-        assert len(signals) == 10
+        self.assertEqual(len(signals), 10)
         for s in signals:
-            assert s.sent == True
-            assert s.scenario_trust == "manual"
+            self.assertTrue(s.sent)
+            self.assertEqual(s.scenario_trust, "manual")
