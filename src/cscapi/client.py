@@ -2,14 +2,17 @@ import datetime
 import logging
 import secrets
 import time
+import re
+from datetime import datetime, timedelta
 from collections import defaultdict
 from dataclasses import asdict, replace, dataclass
 from importlib import metadata
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 
 import httpx
 import jwt
 from cscapi.storage import MachineModel, SignalModel, StorageInterface
+from cscapi.cache import CacheInterface
 from more_itertools import batched
 
 __version__ = metadata.version("cscapi").split("+")[0]
@@ -66,9 +69,29 @@ def _group_signals_by_machine_id(
     return signals_by_machineid
 
 
+@dataclass
+class CAPIClientDecision:
+    identifier: str
+    scope: str
+    value: str
+    dec_type: str
+    origin: str
+    expires_at: int
+
+
+ID_SEP = ":"
+
+
 class CAPIClient:
-    def __init__(self, storage: StorageInterface, config: CAPIClientConfig):
+
+    REMEDIATION_BYPASS = 'bypass'
+    REMEDIATION_CAPTCHA = 'captcha'
+    REMEDIATION_BAN = 'ban'
+    ORIGIN_CAPI = 'capi'
+
+    def __init__(self, storage: StorageInterface, config: CAPIClientConfig, cache: Optional[CacheInterface] = None):
         self.storage = storage
+        self.cache = cache
         self.scenarios = ",".join(sorted(config.scenarios))
         self.latency_offset = config.latency_offset
         self.max_retries = config.max_retries
@@ -343,6 +366,87 @@ class CAPIClient:
         )
 
         return resp.json()
+
+    def _convert_raw_capi_decisions_to_decisions(self, raw_decisions: List) -> List[CAPIClientDecision]:
+        decisions = []
+        for raw_decision in raw_decisions:
+            capi_decisions = raw_decision.get('decisions', [])
+            scope = raw_decision.get('scope')
+            for capi_decision in capi_decisions:
+                # We exclude "new" Capi decision with a "0h" duration
+                if capi_decision.get('duration') == '0h':
+                    continue
+                # Deleted decision contains only the value of the deleted decision (an IP, a range, etc.)
+                if isinstance(capi_decision, str):
+                    # Duration is required but is not used to delete a decision. Thus, we set 0h
+                    capi_decision = {'value': capi_decision, 'duration': '0h'}
+                capi_decision['scope'] = scope
+                capi_decision['type'] = self.REMEDIATION_BAN
+                capi_decision['origin'] = self.ORIGIN_CAPI
+
+                decision = self.convert_raw_decision(capi_decision)
+                if decision:
+                    decisions.append(decision)
+        return decisions
+
+    def convert_raw_decision(self, raw_decision):
+        if not self.validate_raw_decision(raw_decision):
+            return None
+        value = raw_decision['value']
+        dec_type = self._normalize(raw_decision['type'])
+        origin = self._normalize(raw_decision['origin'])
+        duration = raw_decision['duration']
+        scope = self._normalize(raw_decision['scope'])
+
+        identifier = self._handle_decision_identifier(origin, dec_type, scope, value)
+        expires_at = self.handle_decision_expires_at(dec_type, duration)
+        return CAPIClientDecision(identifier, scope, value, dec_type, origin, expires_at)
+
+    def validate_raw_decision(self, raw_decision):
+        required_fields = ['scope', 'value', 'type', 'origin', 'duration']
+        if all(raw_decision.get(field) for field in required_fields):
+            return True
+        self.logger.error('Retrieved raw decision is not as expected', extra={
+            'type': 'REM_RAW_DECISION_NOT_AS_EXPECTED',
+            'raw_decision': raw_decision,
+        })
+        return False
+
+    @staticmethod
+    def _handle_decision_identifier(origin, dec_type, scope, value):
+        return f"{origin}{ID_SEP}{dec_type}{ID_SEP}{scope}{ID_SEP}{value}"
+
+    def _parse_duration_to_seconds(self, duration):
+        pattern = r'(-?)(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)(?:\.\d+)?(m?)s)?'
+        matches = re.match(pattern, duration)
+        if not matches:
+            self.logger.error('An error occurred during duration parsing', extra={
+                'type': 'REM_DECISION_DURATION_PARSE_ERROR',
+                'duration': duration,
+            })
+            return 0
+        seconds = int(matches.group(2) or 0) * 3600 + int(matches.group(3) or 0) * 60 + float(matches.group(4) or 0)
+        if matches.group(5) == 'm':  # if milliseconds
+            seconds *= 0.001
+        if matches.group(1) == '-':  # if negative
+            seconds *= -1
+        return int(round(seconds))
+
+    @staticmethod
+    def _normalize(value):
+        return value.lower()
+
+    def handle_decision_expires_at(self, type, duration):
+        duration_seconds = self._parse_duration_to_seconds(duration)
+
+        return datetime.now() + timedelta(seconds=duration_seconds)
+
+    def refresh_decisions(self, main_machine_id: str, scenarios: List[str]):
+        if self.cache is None:
+            raise RuntimeError("Cache is not set")
+
+        raw_decisions = self.get_decisions(main_machine_id, scenarios)
+        decisions = self._convert_raw_capi_decisions_to_decisions(raw_decisions)
 
     def _get_url(self, endpoint: str) -> str:
         return self.url + endpoint
